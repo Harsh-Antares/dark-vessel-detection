@@ -88,6 +88,16 @@ def train(cfg, train_index: str, val_index: str):
     train_ds = ChipDataset(train_index, cfg, augment=True)
     val_ds = ChipDataset(val_index, cfg, augment=False)
 
+    # The per-epoch validation is a progress signal, not the final verdict
+    # (that's scripts 04/05 on full scenes) — so cap it at a fixed random
+    # subset of chips to keep epochs fast on big validation splits.
+    max_val = cfg.train.get("val_max_chips", 400)
+    n_val_total = len(val_ds.index)
+    if n_val_total > max_val:
+        val_ds.index = (val_ds.index.sample(n=max_val, random_state=cfg.train.seed)
+                        .reset_index(drop=True))
+        print(f"Validation capped at {max_val} random chips (of {n_val_total})")
+
     sampler = PositiveAwareSampler(train_ds.index, cfg.train.positive_fraction,
                                    seed=cfg.train.seed)
     train_loader = DataLoader(train_ds, batch_size=cfg.train.batch_size,

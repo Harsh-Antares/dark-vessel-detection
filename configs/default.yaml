@@ -85,6 +85,9 @@ train:
   mixed_precision: true
   grad_accum_steps: 1
   val_every: 1
+  # Per-epoch validation runs on at most this many random chips (the full
+  # evaluation happens on whole scenes in scripts 04/05).
+  val_max_chips: 400
   seed: 1337
 
 inference:
