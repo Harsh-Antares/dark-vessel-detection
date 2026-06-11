@@ -1,0 +1,103 @@
+# =====================================================================
+# Dark-Vessel Detection on SAR — master configuration
+# Every script reads this file. Override values with --config my.yaml
+# =====================================================================
+
+paths:
+  # Root folder that contains the downloaded xView3 data.
+  # Expected layout (after extraction):
+  #   <data_root>/train/<scene_id>/VH_dB.tif, VV_dB.tif, bathymetry.tif, ...
+  #   <data_root>/validation/<scene_id>/...
+  #   <data_root>/labels/train.csv
+  #   <data_root>/labels/validation.csv
+  data_root: "data/xview3"
+  train_labels: "data/xview3/labels/train.csv"
+  val_labels: "data/xview3/labels/validation.csv"
+  # Where pre-cut training chips are written by scripts/02_build_tiles.py
+  tiles_dir: "outputs/tiles"
+  checkpoints_dir: "outputs/checkpoints"
+  predictions_dir: "outputs/predictions"
+  maps_dir: "outputs/maps"
+  # WDPA marine-protected-area polygons (shapefile or GeoPackage),
+  # downloaded from protectedplanet.net. A single path, or a LIST when
+  # your scenes straddle several countries' waters, e.g. the Adriatic:
+  #   wdpa_path:
+  #     - "data/wdpa/WDPA_ITA/WDPA_...-polygons.shp"
+  #     - "data/wdpa/WDPA_HRV/WDPA_...-polygons.shp"
+  # Currently: Italy + Croatia marine/coastal areas merged into one file
+  # (built from the Jun2026 WDPA country downloads).
+  wdpa_path: "data/wdpa/WDPA_adriatic_marine.gpkg"
+
+scene:
+  # File names inside each xView3 scene folder. The *_dB files are the
+  # two SAR polarisation channels, already converted to decibels.
+  channels:
+    - "VH_dB.tif"
+    - "VV_dB.tif"
+  ancillary:
+    - "bathymetry.tif"
+    - "owiWindSpeed.tif"
+  mask_file: "owiMask.tif"        # 0 = valid sea, 1 = land, 2 = ice
+  pixel_spacing_m: 10.0            # Sentinel-1 IW GRD ground sample distance
+
+tiling:
+  tile_size: 1024                  # pixels per tile side
+  overlap: 128                     # pixels of overlap between adjacent tiles
+  # SAR dB values are clipped to this range before scaling to [0, 1]
+  db_min: -35.0
+  db_max: 0.0
+  # Bathymetry (metres, negative = below sea level) clip range
+  bathy_min: -6000.0
+  bathy_max: 100.0
+  wind_max: 30.0                   # m/s, for wind-speed normalisation
+  # Drop tiles whose land fraction exceeds this (pure-land tiles are useless)
+  max_land_fraction: 0.9
+  # Keep this fraction of *empty* (no-vessel) ocean tiles as negatives
+  empty_tile_keep_prob: 0.05
+
+labels:
+  # xView3 confidence grades. HIGH labels were correlated to AIS;
+  # MEDIUM labels are radar-visible vessels that did NOT correlate.
+  # We treat that correlation status as the dark/cooperative ground truth.
+  train_confidences: ["HIGH", "MEDIUM"]   # LOW labels are too noisy to train on
+  dark_rule: "no_ais_correlation"          # documented in fusion/ais_correlation.py
+
+model:
+  encoder: "resnet34"              # resnet18 | resnet34 | resnet50
+  pretrained: true                 # ImageNet weights for the encoder
+  in_channels: 4                   # VH, VV, bathymetry, wind speed
+  heatmap_sigma: 2.5               # Gaussian splat radius (pixels) for targets
+  head_channels: 64
+
+train:
+  batch_size: 8
+  num_workers: 4
+  epochs: 40
+  lr: 0.0003
+  weight_decay: 0.0001
+  # Multi-task loss weights
+  w_heatmap: 1.0
+  w_vessel: 0.5
+  w_fishing: 0.5
+  w_length: 0.2
+  # Fraction of each batch guaranteed to contain at least one vessel
+  positive_fraction: 0.75
+  mixed_precision: true
+  grad_accum_steps: 1
+  val_every: 1
+  seed: 1337
+
+inference:
+  score_threshold: 0.35            # heatmap peak threshold
+  nms_radius_m: 100.0              # merge detections closer than this
+  match_radius_m: 200.0            # truth matching radius for evaluation
+  batch_tiles: 4
+
+effort:
+  # Assumed mean duration (hours) a vessel detected in one SAR snapshot
+  # spends fishing in the area. This is the key extrapolation assumption —
+  # see docs and analysis/effort.py for the reasoning and uncertainty model.
+  mean_visit_hours: 8.0
+  visit_hours_low: 4.0
+  visit_hours_high: 14.0
+  bootstrap_iters: 2000

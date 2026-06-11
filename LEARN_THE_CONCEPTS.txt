@@ -1,0 +1,637 @@
+=======================================================================
+ LEARN THE CONCEPTS — A DEEP-DIVE TEACHING GUIDE
+ Dark-Vessel Detection on SAR, explained from first principles
+=======================================================================
+
+This document walks through the project the way a mentor would: what
+each stage does, HOW it does it, and the underlying concept you should
+actually learn along the way. Read it next to the code — every section
+names the file it explains.
+
+CONTENTS
+  PART A — The domain: radar, ships, and the dark-vessel problem
+  PART B — The geospatial engineering: giant rasters and tiling
+  PART C — The deep learning: heatmap detection from first principles
+  PART D — Training mechanics: losses, imbalance, multi-task learning
+  PART E — Inference: peaks, NMS, and stitching a scene back together
+  PART F — Data fusion: how "dark" is actually decided
+  PART G — From detections to a decision product: maps, hours, error bars
+  PART H — Evaluation: which numbers matter and why
+
+
+=======================================================================
+ PART A — THE DOMAIN
+=======================================================================
+
+A1. What is SAR (Synthetic Aperture Radar)?
+-------------------------------------------
+A camera is a PASSIVE sensor: it records sunlight reflected off the
+world, so it needs daylight and clear skies. Radar is an ACTIVE sensor:
+the satellite transmits its own microwave pulses and records the echo
+("backscatter"). Two consequences matter enormously here:
+  * It works at night — it brings its own illumination.
+  * Microwaves (Sentinel-1 uses C-band, ~5.5 cm wavelength) pass
+    through clouds, rain, and smoke almost untouched.
+So SAR images the ocean 24/7 in any weather. That is why it is the ONLY
+sensor that can reliably see ships that don't want to be seen.
+
+The "synthetic aperture" part: angular resolution of a radar antenna is
+proportional to antenna size, and a satellite can't carry a kilometres-
+long antenna. Instead, as the satellite flies, it records echoes along
+its path and combines them in software AS IF they came from one giant
+antenna — an aperture that is "synthesized" by motion. That's how a
+700 km-high satellite achieves ~10 m ground resolution.
+
+A2. Why do ships glow in SAR images?
+------------------------------------
+The open sea, slightly roughened by wind, scatters most microwave
+energy AWAY from the satellite (like a slightly wavy mirror) — so ocean
+looks dark. A metal ship is full of right-angled surfaces (hull-deck,
+deck-superstructure). Right angles act as CORNER REFLECTORS: they bounce
+energy straight back where it came from, like a bicycle reflector. So a
+metal vessel appears as a small cluster of very bright pixels against a
+dark background. That contrast is the physical signal our detector
+learns.
+
+Caveats the project handles:
+  * Wind roughens the sea and raises background brightness ("sea
+    clutter") — that's why wind speed is fed to the model as an input
+    channel: it tells the network how bright "empty ocean" should look.
+  * Fixed metal infrastructure (wind turbines, oil platforms, buoys)
+    also glints like a ship — that's why there's a dedicated
+    vessel-vs-non-vessel classification head.
+
+A3. VV and VH polarisation — why two channels?
+----------------------------------------------
+Microwaves are transverse waves with an orientation (polarisation).
+Sentinel-1 transmits Vertically polarised pulses and records the echo
+in two ways:
+  * VV — transmitted Vertical, received Vertical.
+  * VH — transmitted Vertical, received Horizontal ("cross-pol").
+Simple single-bounce surfaces (the sea) mostly preserve polarisation,
+so they show up in VV. Complex multi-bounce structures (ship
+superstructures) rotate some of the energy into the horizontal plane,
+so they show up relatively brighter in VH. In practice: VH has less sea
+clutter and makes ships pop; VV carries complementary texture. Feeding
+both channels lets the network exploit the difference — analogous to
+how colour helps more than greyscale.
+
+A4. Decibels and why SAR data is "heavy-tailed"
+-----------------------------------------------
+Raw backscatter intensities span many orders of magnitude — sea might
+return 0.001 while a ship's corner reflector returns 10. A neural
+network hates inputs like that. The standard fix is the decibel scale:
+    value_dB = 10 * log10(intensity)
+Logarithms compress huge ranges into manageable ones. xView3 ships its
+imagery already in dB; we then clip to [-35, 0] dB (below -35 is noise,
+0 dB is already extremely bright) and rescale to [0, 1].
+This is the single most important normalisation decision in the
+pipeline (see tiling.py, _clip_scale).
+
+A5. Speckle
+-----------
+SAR images look "grainy" even over uniform sea. This is speckle: within
+each pixel, many tiny wave reflections interfere constructively or
+destructively at random. It is multiplicative noise inherent to all
+coherent imaging (lasers do it too). We don't explicitly de-speckle —
+the convolutional network learns to average over it — but it's why a
+single bright pixel is NOT yet a ship, and why detection of 3-pixel
+targets is genuinely hard.
+
+A6. AIS, and what "dark vessel" really means
+--------------------------------------------
+AIS (Automatic Identification System) is a VHF radio transponder that
+broadcasts a ship's identity (MMSI number), position, course, and
+speed, mainly for collision avoidance. International rules require it
+on larger vessels — but the captain can switch it off, and those who
+fish illegally do.
+
+A "dark vessel" = a vessel physically present (radar sees it) that is
+not broadcasting AIS (the database doesn't). READ THIS TWICE:
+darkness is a property of the RELATIONSHIP between two data sources,
+not of the radar image. No model can look at a SAR chip and "see" that
+AIS is off — a dark trawler and a cooperative trawler are pixel-
+identical. The dark label is produced by DATA FUSION (Part F). Stating
+this clearly in your write-ups is a maturity signal; claiming a CNN
+detects "darkness" visually is a classic rookie overclaim.
+
+A7. The dataset: xView3-SAR
+---------------------------
+~1,000 Sentinel-1 IW GRD scenes (~29,000 x 24,000 px, 10 m/pixel), each
+with: VH_dB and VV_dB SAR channels; co-registered bathymetry (sea
+depth), wind speed/direction/quality, and a land/ice mask; plus 220k+
+labels as POINTS (scene row/col), each carrying is_vessel, is_fishing,
+vessel_length_m, distance_from_shore_km, and a confidence grade.
+The labels were created by matching AIS to SAR: HIGH-confidence =
+AIS-correlated (identity known => cooperative), MEDIUM = visually
+confirmed in radar but no AIS match (=> our dark ground truth), LOW =
+uncertain (we exclude them). The validation split has the cleanest
+labels — mine it.
+
+
+=======================================================================
+ PART B — GEOSPATIAL ENGINEERING  (data/tiling.py, scripts/02)
+=======================================================================
+
+B1. Rasters, GeoTIFFs, and the geotransform
+-------------------------------------------
+A raster is a grid of pixels; a GeoTIFF is a raster plus metadata that
+pins the grid to the Earth: a coordinate reference system (CRS) and an
+AFFINE GEOTRANSFORM — six numbers mapping pixel (row, col) to map
+coordinates (x, y):
+    x = a*col + b*row + c
+    y = d*col + e*row + f
+(c, f) is the top-left corner; a and e are pixel width/height in map
+units. This little matrix is what lets us say "the bright blob at pixel
+(14302, 9871) is at 11.42E, 42.18N". Lose it and your detections are
+just numbers; keep it and they're evidence you can put on a chart.
+In code: rasterio exposes it as dataset.transform, and
+SceneReader.pixel_to_lonlat() applies it (plus a projection conversion
+to WGS84 lat/lon if the scene is stored in a projected CRS like UTM).
+
+B2. CRS in one paragraph
+------------------------
+The Earth is a lumpy ellipsoid; maps are flat. A CRS is the contract
+for flattening. EPSG:4326 (WGS84) = raw longitude/latitude in degrees —
+great for storage, terrible for measuring distance (a degree of
+longitude shrinks toward the poles). UTM zones = local metre-based
+projections, good for distances. Equal-area projections (we use World
+Mollweide, ESRI:54009) preserve AREA — which is why mpa.py reprojects
+MPA polygons to Mollweide before computing km^2. Computing "area" in
+degrees is a meaningless number; this is one of the most common GIS
+bugs in the wild.
+
+B3. Windowed reads — handling rasters bigger than RAM
+-----------------------------------------------------
+A 29,000 x 24,000 float32 raster is ~2.8 GB per channel; with 5+
+channels you'd need ~15 GB just to LOOK at one scene. The fix: GeoTIFFs
+are internally chunked, so you can read any rectangular window straight
+off disk without touching the rest:
+    src.read(1, window=Window(col_off, row_off, w, h))
+SceneReader._read_window does exactly this (with boundless=True to pad
+at scene edges). The whole pipeline — tiling AND inference — never
+holds a full scene in memory. This pattern (windowed/streamed I/O over
+data that doesn't fit) is a transferable engineering skill far beyond
+remote sensing.
+
+B4. Overlapping tiles and the seam problem
+------------------------------------------
+We cut scenes into 1024x1024 tiles. If tiles touched edge-to-edge, a
+vessel sitting exactly on the boundary would be half in each tile and
+might be missed in both. So adjacent tiles OVERLAP by 128 px: every
+vessel appears fully inside at least one tile. The cost: a vessel in
+the overlap strip is detected twice. The cure is geographic NMS at
+inference (Part E3). iter_tile_specs() implements the overlapping grid;
+note how the last row/column is shifted back so tiles never run off the
+scene.
+
+B5. Normalisation of each input channel
+---------------------------------------
+Networks train best when inputs live in a similar, bounded range:
+  * SAR dB: clip [-35, 0] -> [0, 1]   (Part A4)
+  * Bathymetry: clip [-6000, 100] m -> [0, 1]. Depth matters because
+    most fishing happens over shelves and banks — the network can learn
+    "vessels here are plausible fishers".
+  * Wind speed: clip [0, 30] m/s -> [0, 1]. Tells the model the
+    expected clutter level.
+  * NaNs (nodata) are filled with 0 after scaling.
+The land/ice mask is NOT fed to the model as a channel here; it's used
+to (a) drop near-pure-land tiles and (b) hard-zero the output heatmap
+over land at inference. A hard rule beats a learned rule when the rule
+is exact.
+
+B6. Sparsity and positive-aware sampling
+----------------------------------------
+The ocean is mostly empty: the vast majority of tiles contain zero
+vessels. Two interventions:
+  * At tiling time we keep ALL tiles containing labels but only ~5% of
+    empty tiles (config: empty_tile_keep_prob) — the rest teach the
+    model nothing and waste disk.
+  * At training time, PositiveAwareSampler (dataset.py) composes each
+    epoch so ~75% of sampled chips contain at least one vessel. Without
+    this, batches are almost all background and the gradient signal
+    from rare positives drowns.
+General lesson: when positives are rare, you control the data
+distribution the model sees — you don't accept the natural one.
+
+
+=======================================================================
+ PART C — THE DEEP LEARNING  (models/model.py)
+=======================================================================
+
+C1. Convolutional networks in three paragraphs
+----------------------------------------------
+A convolution slides a small learnable filter (say 3x3) across the
+image, producing a map of "how much does each location look like this
+pattern". Early layers learn edges and blobs; deeper layers compose
+them into textures and object parts. Three properties make convolutions
+ideal for imagery: locality (nearby pixels relate), weight sharing (a
+ship-pattern detector works anywhere in the image), and translation
+equivariance (shift the input, the output shifts).
+
+Downsampling (strided convs / pooling) makes deeper layers see LARGER
+context per output cell at LOWER spatial resolution. A classification
+net ends with global pooling — "what is in this image" — throwing
+position away entirely. Detection needs the opposite: we must know
+WHERE, to 10-metre precision.
+
+That tension — deep semantic features vs fine spatial precision — is
+the central design problem of dense prediction, and the U-Net is its
+classic resolution.
+
+C2. The U-Net: encoder, decoder, skip connections
+-------------------------------------------------
+Shape: a "U". The ENCODER (left side) is a standard CNN (here, a
+ResNet) that downsamples 1/2 -> 1/4 -> ... -> 1/32 while growing
+channel depth: it builds "what is here" understanding. The DECODER
+(right side) upsamples step by step back to full resolution. The trick
+is the SKIP CONNECTIONS: at each decoder step, the upsampled deep
+features are CONCATENATED with the encoder features of the same
+resolution. The decoder therefore gets both the semantics ("this region
+has ship-like context") and the crisp spatial detail ("the bright pixel
+is exactly HERE"). For 3-pixel targets, those skip connections aren't a
+nicety — without them the precise location is unrecoverable after 32x
+downsampling.
+In code: ResNetEncoder returns five feature scales; UNetDecoder._up_cat
+does bilinear-upsample + concatenate; each up-block is two 3x3 convs.
+
+C3. ResNets and transfer learning on radar
+------------------------------------------
+A ResNet stacks residual blocks: each block computes F(x) and outputs
+x + F(x). The identity path lets gradients flow through dozens of
+layers without vanishing — the innovation that made very deep nets
+trainable (He et al., 2015).
+We initialise the encoder with ImageNet-pretrained weights. But
+ImageNet is 3-channel RGB photos and we have 4-channel radar+ancillary
+stacks. The standard adaptation (ResNetEncoder.__init__): rebuild the
+first conv for 4 channels, initialising each new channel with the MEAN
+of the pretrained RGB filters. Why does ImageNet help on radar at all?
+Because the earliest filters are generic edge/blob/texture detectors,
+useful for any imagery; the network fine-tunes the rest. Pretraining
+mostly buys faster convergence and better behaviour when labelled data
+is limited.
+
+C4. Why heatmaps instead of bounding boxes — the core modelling choice
+----------------------------------------------------------------------
+Classic detectors (Faster R-CNN, YOLO, SSD) predict BOXES, mostly by
+classifying and refining pre-placed "anchor" boxes of various sizes.
+That machinery assumes objects have meaningful extent and shape. An
+xView3 vessel is ~3-20 px — effectively a POINT (the labels themselves
+are points!). For point-like targets, anchors are pure overhead: sizes
+to tune, positive/negative IoU thresholds that misbehave for tiny
+boxes, NMS over thousands of proposals.
+
+The CenterNet/keypoint alternative reframes detection as DENSE
+REGRESSION: predict one full-resolution map where the value at each
+pixel is "the probability a vessel is centred here". Training targets:
+render a small 2-D Gaussian (sigma ~2.5 px) at every true vessel
+location (dataset.py: gaussian_splat — note overlapping vessels take
+the per-pixel MAX, keeping nearby peaks distinct). Inference: find
+local maxima (Part E1). No anchors, no box hyper-parameters, graceful
+handling of dense clusters of small boats. This matches what the
+strongest xView3 competition solutions did.
+
+Why a Gaussian rather than a single hot pixel? Tolerance: a prediction
+1 px off a true centre is nearly correct, and the soft target says so
+— it also feeds the "penalty-reduced" part of the focal loss (D2).
+
+C5. The attribute heads and multi-task learning
+-----------------------------------------------
+On the shared decoder output, four tiny heads (3x3 conv -> ReLU -> 1x1
+conv) each produce a full-resolution map:
+    heatmap — vessel-centre confidence (the detector)
+    vessel  — P(vessel | something here): rejects turbines/platforms
+    fishing — P(fishing vessel)
+    length  — predicted log(vessel length in metres)
+The attribute maps are only READ AT POINTS: during training, at ground-
+truth centres (gather_at_points); at inference, at detected peaks. This
+is the standard CenterNet pattern — "predict everywhere, supervise at
+keypoints".
+Multi-task learning means one backbone optimised for several objectives
+at once (a weighted loss sum, Part D4). Benefits: shared features
+become more general (length cues help vessel-ness; fishing-vessel shape
+helps both), one model to deploy instead of four, and regularisation —
+each task constrains the others against overfitting.
+Why log-length? Lengths span ~5 m to ~300 m; in log space the target is
+roughly Gaussian and a fixed absolute error means a fixed RELATIVE
+error, which matches how the metric scores it.
+
+C6. A small detail with a big effect: heatmap bias initialisation
+-----------------------------------------------------------------
+DarkVesselNet initialises the heatmap head's final bias to -4.6, i.e.
+sigmoid ~0.01. Untrained networks otherwise start predicting ~0.5
+everywhere; with 99.999% background, the first epochs would be spent
+just learning "almost everything is background", with huge unstable
+losses. Starting at the true base rate skips that. (Trick from the
+RetinaNet/focal-loss paper.)
+
+
+=======================================================================
+ PART D — TRAINING MECHANICS  (models/losses.py, train.py)
+=======================================================================
+
+D1. The class-imbalance problem, quantified
+-------------------------------------------
+A 1024x1024 tile has 1,048,576 pixels; a vessel occupies ~10. Even a
+tile with 5 vessels is 99.995% background. With plain binary cross-
+entropy, background dominates the loss ~20,000:1 — the model learns to
+output 0 everywhere and the loss still looks great. Every design choice
+in this part exists to defeat that ratio.
+
+D2. Focal loss, derived in steps  (heatmap_focal_loss)
+------------------------------------------------------
+Start from BCE for one pixel: -log(p) if positive, -log(1-p) if
+negative. Problem: millions of EASY negatives (open ocean, p already
+~0.001) each contribute a tiny loss, but their sheer number swamps the
+few positives.
+Step 1 — the focal term (Lin et al., 2017): multiply by how WRONG the
+model is:  positives get (1-p)^alpha * -log(p); negatives get
+p^alpha * -log(1-p), with alpha=2. An easy negative with p=0.01
+now contributes 0.0001x its BCE loss — effectively muted. Gradient
+concentrates on hard examples.
+Step 2 — the penalty-reduction term (CornerNet): pixels NEAR a true
+centre aren't really negatives; punishing the model for firing 2 px off
+a vessel is counterproductive. Our Gaussian target y encodes nearness,
+so negatives are additionally weighted by (1-y)^beta (beta=4): full
+penalty far from any vessel, almost none right next to a peak.
+Step 3 — normalise by the NUMBER OF POSITIVES (not pixels), so a tile's
+loss scale doesn't depend on how empty it is.
+That's the whole loss — read heatmap_focal_loss line by line now and
+it should map 1:1 to these steps.
+
+D3. Masked attribute losses
+---------------------------
+xView3 labels have honest gaps: is_fishing is often unknown (NaN), the
+length too. We must not invent targets. Each attribute gets a MASK
+(1 = known, 0 = unknown); the per-point loss is multiplied by the mask
+and divided by mask.sum() — unknowns contribute exactly zero gradient
+(masked_point_bce / masked_point_l1). For length we use Smooth-L1
+(Huber): quadratic for small errors, linear for big ones, so one
+mislabelled 300 m tanker doesn't blow up the gradients like plain MSE
+would.
+
+D4. Combining the tasks
+-----------------------
+total = 1.0*heatmap + 0.5*vessel + 0.5*fishing + 0.2*length
+The weights encode priority: detection is the mission; attributes
+refine it. Symptoms to watch when YOU tune them: if detection F1 is
+fine but length error is terrible, raise w_length; if the heatmap
+degrades when attributes are added, lower theirs. (Fancier schemes —
+uncertainty weighting, GradNorm — exist; fixed weights are fine here.)
+
+D5. The optimisation stack, briefly
+-----------------------------------
+  * AdamW: Adam (per-parameter adaptive learning rates from gradient
+    moment estimates) with weight decay applied correctly (decoupled
+    from the adaptive scaling). Default optimiser for vision today.
+  * Cosine learning-rate schedule: LR decays smoothly from 3e-4 to ~0
+    over training — big steps early, gentle polishing late.
+  * Mixed precision (autocast + GradScaler): compute in float16 where
+    safe, keep master weights in float32, scale the loss so tiny fp16
+    gradients don't underflow to zero. ~2x faster, ~half the memory,
+    same accuracy. Free performance on modern GPUs.
+  * Gradient accumulation: if GPU memory limits you to batch 4, run N
+    micro-batches, summing gradients, and step the optimiser every N —
+    mathematically a batch of 4N.
+  * Augmentation (dataset.py): random flips and 90-degree rotations.
+    Safe because open ocean has no preferred orientation at this scale;
+    each labelled point's coordinates are transformed with the image.
+    Effectively multiplies the dataset 8x.
+
+D6. Watching the right number during training
+---------------------------------------------
+train.py evaluates a quick detection P/R/F1 on validation chips every
+epoch (peak extraction + greedy matching within 20 px = 200 m), and
+checkpoints the best F1, not the best loss. Loss and metric usually
+agree, but when they diverge, the metric is the truth. Expect F1 ~0 for
+the first epochs (threshold not yet exceeded) — that's normal.
+
+
+=======================================================================
+ PART E — INFERENCE  (inference/peaks.py, nms.py, predict.py)
+=======================================================================
+
+E1. Peak extraction — the 5-line detector head
+----------------------------------------------
+A detection = a local maximum of the predicted heatmap above a score
+threshold. Implementation trick: run a 3x3 maximum filter over the
+heatmap; a pixel that EQUALS its own neighbourhood-max IS the local
+max. Two lines of scipy replace the entire proposal/NMS machinery of
+box detectors. The score threshold is your precision/recall dial: for
+dark-vessel work you bias toward recall (lower threshold) — a false
+alarm costs an analyst a glance; a missed dark vessel is the mission
+failing.
+
+E2. Sliding-window scene inference
+----------------------------------
+predict_scene() walks the same overlapping tile grid as training,
+reads each window off disk, predicts, extracts peaks, and converts
+peak coordinates: tile (row, col) + tile offset -> scene (row, col) ->
+geotransform -> lon/lat. Land pixels are hard-zeroed in the heatmap
+first (the mask is exact knowledge — don't ask the network to relearn
+the coastline). Tiles that are >90% land are skipped entirely.
+
+E3. Geographic NMS — de-duplicating across seams
+------------------------------------------------
+Because tiles overlap, one vessel near a seam is detected by 2-4 tiles.
+These duplicates are in DIFFERENT tiles, so per-tile suppression can't
+see them; we de-duplicate in SCENE coordinates: sort all detections by
+score; repeatedly keep the best remaining one and suppress every other
+detection within 100 m of it. A k-d tree (a binary space-partitioning
+structure giving O(log n) radius queries) makes this O(n log n) —
+worth knowing: k-d trees are THE tool for "what's near this point"
+problems, and they reappear in the AIS matching and the evaluation.
+
+E4. What each final detection carries
+-------------------------------------
+scene_id, scene row/col, lon/lat, heatmap score, P(vessel),
+P(fishing), estimated length in metres — i.e. everything downstream
+fusion and analysis need, in one CSV row per ship.
+
+
+=======================================================================
+ PART F — DATA FUSION: HOW "DARK" IS DECIDED  (fusion/ais_correlation.py)
+=======================================================================
+
+F1. The principle
+-----------------
+Two independent observations of the same ocean:
+   SAR:  "something metal is at (lat, lon) at time T"     (physics)
+   AIS:  "I am vessel #123 at (lat, lon) at time T"       (self-report)
+Correlate them: a SAR detection WITH a matching AIS report within a
+space-time window is COOPERATIVE; one with NO match is DARK. The
+intelligence is in the discrepancy. All "dark vessel detection"
+systems, including Global Fishing Watch's, are built on this exact
+join.
+
+F2. Space-time matching done honestly (live mode)
+-------------------------------------------------
+AIS messages arrive irregularly (seconds to minutes apart), and the SAR
+snapshot is one instant. So for each AIS track (grouped by MMSI), we
+LINEARLY INTERPOLATE position to the SAR acquisition time (between the
+last fix before and first fix after), then match detections to
+interpolated positions within a radius (~500 m — generous because ships
+move and both sources have positional error). Matching uses the same
+k-d tree pattern as NMS. Edge cases handled: a track with fixes only
+before (or after) the snapshot is used only if the gap is small;
+detections matching nothing stay dark; if NO usable AIS exists,
+everything is "dark" and the code's comment says: report that loudly,
+not silently.
+
+F3. xView3 mode (what the scripts use)
+--------------------------------------
+The dataset's makers already did F2 against historical AIS when
+building the labels: confidence HIGH = AIS-correlated (cooperative),
+MEDIUM = visually-confirmed vessel with no AIS match (dark). So
+transfer_dark_labels() nearest-neighbour-matches OUR detections to
+ground-truth points (200 m) and inherits the status. Detections
+matching no label get is_dark = NaN — "unknown", kept distinct from
+both classes. Preserving a three-way dark/cooperative/unknown split
+instead of force-classifying everything is the kind of honesty the
+evaluation rewards.
+
+A note on local distance computation: to measure metres between
+lon/lat points over a <100 km extent, we use a local equirectangular
+projection — x = R*lon*cos(lat0), y = R*lat (radians). Within a scene
+the error is negligible, and it's 100x cheaper than exact geodesics.
+Know when approximations are safe; document them when you use them.
+
+F4. The optional risk prior — and its careful framing
+-----------------------------------------------------
+fit_dark_prior() trains a logistic regression P(dark | length,
+P(fishing), score), wrapped in a probability CALIBRATION step
+(CalibratedClassifierCV): raw classifier scores are often not true
+probabilities; calibration fixes the mapping so "0.8" means "right 80%
+of the time". Use: RANKING detections for analyst triage when AIS is
+unavailable. Never say it identifies dark vessels — it encodes priors
+like "small fishing vessels far from port are more often dark". The
+difference between a prior and an identification is exactly the
+difference between defensible analytics and an overclaim.
+
+
+=======================================================================
+ PART G — FROM DETECTIONS TO A DECISION PRODUCT  (analysis/, visualization/)
+=======================================================================
+
+G1. Spatial joins (analysis/mpa.py)
+-----------------------------------
+"Which detections are inside which protected area?" is a point-in-
+polygon test, done at scale by geopandas' sjoin with an R-tree spatial
+index (the polygon analogue of the k-d tree). MPA polygons come from
+the WDPA (Protected Planet) database. Output per MPA: total/dark/
+cooperative counts, the dark ratio, and dark density per km^2 — with
+areas computed in an equal-area projection (B2!).
+
+G2. Snapshots to hours — the extrapolation, stated plainly
+----------------------------------------------------------
+What we HAVE: k dark vessels visible in an MPA at a few instants (one
+per SAR pass, days apart). What people ASK for: "how much illegal
+fishing happens here?" Bridging that gap requires assumptions, and the
+whole game is making them EXPLICIT:
+  Model: dark-vessel presence is roughly stationary over the window,
+  and each pass is an unbiased instantaneous sample. Then the per-pass
+  count estimates lambda = average number of dark vessels present at
+  any moment, and over a window of T hours:
+        estimated dark-vessel-hours H = lambda * T.
+  (Intuition: lambda vessels present on average, for T hours.)
+  Corrections: divide counts by the detector's measured DARK RECALL —
+  if you only catch 80% of dark vessels, the truth is count/0.8. An
+  explicit, measured correction, not a fudge.
+This mirrors Global Fishing Watch's "apparent fishing effort" framing.
+And the language matters: these are PRESENCE-hours of dark vessels —
+strong evidence of illegal-fishing pressure, not a court-ready measure
+of fishing time.
+
+G3. Uncertainty: bootstrap and a Bayesian fallback (analysis/effort.py)
+-----------------------------------------------------------------------
+A single number ("4,200 illegal fishing hours!") invites deserved
+skepticism; an interval invites trust.
+  * THE BOOTSTRAP: with n per-pass counts, resample n counts WITH
+    replacement many times; each resample's mean is one plausible
+    lambda. The 2.5th-97.5th percentiles of those means form a 95%
+    confidence interval. No distributional assumptions, three lines of
+    numpy, works for almost any statistic — if you learn one
+    statistical tool from this project, learn this one.
+  * Tiny-sample fallback (n < 3): bootstrap degenerates, so we use the
+    exact Bayesian result — for Poisson counts with a Jeffreys prior,
+    the rate's posterior is Gamma(total_count + 0.5, n) — and sample
+    from it instead.
+The interval is then carried through to hours (H = lambda*T) and
+printed on the map itself. Reviewers respect "1,800 [900-3,100] hours,
+assumptions attached" far more than any confident single number.
+
+G4. The map (visualization/maps.py)
+-----------------------------------
+folium writes Leaflet.js interactive maps from Python. Layers: MPA
+polygons (green), cooperative detections (blue), dark detections
+(red), unknown (grey), a heat-surface of dark density, and a banner
+with the hours estimate ± CI. Each marker's popup carries its score,
+P(vessel), P(fishing), and length. Design intent: a non-expert should
+open pressure_map.html and within ten seconds understand "red dots =
+ships hiding inside a protected area". That one artifact communicates
+the entire project better than any table.
+
+
+=======================================================================
+ PART H — EVALUATION  (evaluation/metrics.py)
+=======================================================================
+
+H1. Matching detections to truth
+--------------------------------
+With point detections, "correct" means "within 200 m of an unclaimed
+truth point" (20 px at 10 m/px — xView3's official radius). Greedy
+1-to-1 matching in descending score order: each truth point can be
+claimed once; a second detection on the same ship is a false positive
+(this is what punishes seam duplicates if your NMS is weak). From the
+matching: TP, FP, FN.
+
+H2. Precision, recall, F1 — and which errors cost what
+------------------------------------------------------
+precision = TP/(TP+FP): of my alarms, how many were real?
+recall    = TP/(TP+FN): of the real ships, how many did I find?
+F1 = harmonic mean — punishes imbalance between them (arithmetic mean
+of 1.0 and 0.0 is 0.5; harmonic is 0). But the F1 treats both error
+types as equally costly, and in THIS mission they aren't: a missed
+dark vessel is the system failing at its purpose; a false positive
+costs a second look. Hence the breakdown:
+  * DARK RECALL — recall computed only over dark truth vessels. The
+    single most mission-relevant number, and the one standard
+    leaderboard metrics ignore.
+  * CLOSE-TO-SHORE recall (<2 km) — coastal clutter (rocks, surf,
+    structures) is the hardest regime; models that look great offshore
+    often collapse here; report it separately so the failure mode is
+    visible.
+  * VESSEL/NON-VESSEL and FISHING F1 on matched detections — the
+    attribute heads' quality.
+  * LENGTH SCORE — xView3-style: 1 minus mean absolute percentage
+    error (so 1.0 is perfect).
+  * An xView3-style AGGREGATE combining the above, so you have one
+    comparable headline alongside the slices that carry the mission.
+
+H3. The meta-lesson
+-------------------
+Choosing metrics IS choosing what the system optimises for. "Report
+more than a single F1" is not bureaucracy — single-number leaderboards
+actively hide mission-critical failures (a detector with stellar
+overall F1 can have terrible dark recall if dark vessels are smaller
+on average — which they are). Designing the metric slice that exposes
+this is exactly the judgement employers are probing for when they ask
+"how did you evaluate it?".
+
+
+=======================================================================
+ CLOSING: THE TEN IDEAS YOU SHOULD WALK AWAY OWNING
+=======================================================================
+ 1. Active vs passive sensing — why SAR sees what cameras and AIS miss.
+ 2. "Dark" is a data-fusion result, never a visual class. Say so.
+ 3. dB scaling + clipping: taming heavy-tailed physical data for nets.
+ 4. Windowed raster I/O: processing data that doesn't fit in memory.
+ 5. Overlap-tile + geographic-NMS: the seam problem and its cure.
+ 6. Heatmap/center-point detection: the right formulation for point
+    targets — formulation beats architecture.
+ 7. Focal loss: how gradient gets refocused under 100,000:1 imbalance.
+ 8. Multi-task heads on a shared backbone, with NaN-masked supervision.
+ 9. The bootstrap: uncertainty intervals for any statistic in 3 lines.
+10. Mission-aligned evaluation: the metric that matters (dark recall)
+    is the one the standard benchmark doesn't report.
+=======================================================================

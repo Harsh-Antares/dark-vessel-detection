@@ -1,0 +1,141 @@
+=======================================================================
+ DARK-VESSEL DETECTION ON SAR — WHAT THIS PROJECT IS
+=======================================================================
+
+THE 30-SECOND VERSION
+---------------------
+Roughly 1 in 5 large commercial fishing vessels operates "dark":
+physically present on the ocean but broadcasting no AIS identity signal
+— and a disproportionate share of that happens inside protected waters
+where fishing is illegal. Satellite radar (SAR) sees ships at night,
+through clouds, and regardless of whether they are broadcasting. This
+project trains a deep-learning detector on the xView3-SAR dataset
+(~1,000 Sentinel-1 radar scenes, 220k+ labelled vessels), separates
+dark from cooperative vessels by fusing radar detections with AIS
+records, and turns the result into a map of estimated illegal-fishing
+pressure inside a marine protected area (MPA).
+
+The one-sentence framing that defines the whole project:
+    "The radar sees it. AIS doesn't. That discrepancy IS the signal."
+
+
+WHY IT MATTERS
+--------------
+Illegal, unreported and unregulated (IUU) fishing is a multi-billion-
+dollar problem and a leading driver of fish-stock collapse. Enforcement
+leans on AIS — transponders broadcasting each ship's identity and
+position — but AIS is trivially defeated: a captain who wants to fish
+where they shouldn't just switches it off. Those vessels vanish from
+conventional monitoring. SAR is an active sensor (it provides its own
+microwave illumination), so a metal hull lights up against the dark sea
+surface whether or not anyone is cooperating. The intelligence value
+isn't the ship; it's the mismatch between what radar sees and what AIS
+reports.
+
+
+THE KEY INTELLECTUAL HONESTY POINT
+----------------------------------
+You CANNOT tell from a radar image whether a ship is broadcasting AIS.
+A dark trawler and a cooperative trawler scatter microwaves
+identically. "Dark" is therefore not a visual class the neural network
+predicts — it is the RESULT OF A DATA-FUSION STEP: a radar detection
+that fails to match any AIS message within a space-time window is
+labelled dark. (This is exactly how xView3's own labels were made.)
+The machine learning earns its keep where ML is genuinely needed:
+finding tiny, low-signature vessels with high recall, rejecting fixed
+infrastructure (wind turbines, platforms, buoys), classifying fishing
+vs non-fishing, and estimating vessel length — because "small, dark,
+fishing vessel inside an MPA" is the precise signature of illegal
+fishing.
+
+
+THE FIVE-STAGE PIPELINE (and where each lives in the code)
+----------------------------------------------------------
+Stage 1 — TILING  (src/dark_vessel/data/tiling.py, scripts/02)
+  Scenes are ~29,000 x 24,000 pixels — far too big for a GPU. We read
+  1024x1024 windows straight off disk (rasterio windowed I/O), with
+  128 px overlap so no vessel is cut in half by a tile seam.
+  SAR values are normalised (dB clip to [-35, 0] then scale to [0,1])
+  and stacked with ancillary layers: bathymetry (where fishing is
+  plausible) and wind speed (conditions sea clutter). The land mask
+  drops useless land tiles. Crucially, every tile remembers its scene
+  offset and the scene keeps its geotransform, so every detection maps
+  back to a latitude/longitude.
+
+Stage 2 — DETECTOR  (src/dark_vessel/models/model.py)
+  A vessel in this imagery is a handful of bright pixels — basically a
+  point, not a box. So instead of a bounding-box detector we use a
+  CenterNet-style heatmap model: a U-Net (ResNet encoder + skip-
+  connected decoder) outputs a per-pixel "vessel centred here?" score;
+  each true vessel is a small Gaussian peak in the training target.
+  Trained with a penalty-reduced focal loss to survive the extreme
+  imbalance (10 vessel pixels per million ocean pixels). At inference,
+  local maxima of the heatmap above a threshold are the detections.
+
+Stage 3 — ATTRIBUTE HEADS  (same file)
+  Small heads on the shared features predict, at each detection:
+  vessel vs fixed-infrastructure, fishing vs non-fishing, and vessel
+  length (regressed in log-metres). Trained jointly with the heatmap
+  (weighted multi-task loss, losses.py). These attributes are what
+  turn "a blob" into "a small dark fishing vessel".
+
+Stage 4 — SAR x AIS FUSION  (src/dark_vessel/fusion/ais_correlation.py)
+  The dark/cooperative split. In xView3 mode we inherit the AIS-
+  correlation status baked into the labels (confidence HIGH = AIS-
+  matched = cooperative; MEDIUM = radar-visible but unmatched = dark)
+  by nearest-neighbour matching our detections to ground truth. A live
+  mode is also implemented: interpolate real AIS tracks to the SAR
+  acquisition time and match within a radius — no match means dark.
+  There's also an optional calibrated logistic model P(dark | length,
+  fishing, score) usable as a triage risk score — explicitly a prior,
+  never an identification.
+
+Stage 5 — MPA PRESSURE MAP  (src/dark_vessel/analysis/, visualization/)
+  Dark detections are spatially joined to marine-protected-area
+  polygons from the WDPA database. Per MPA we report counts, the
+  dark/cooperative ratio, and density per km^2 per pass. Then the
+  careful part: a SAR image is one instantaneous snapshot, so turning
+  "k dark vessels per pass" into "estimated dark-vessel-HOURS over a
+  window" is an extrapolation. We model per-pass counts as a Poisson
+  process, bootstrap the rate, correct for the detector's measured
+  dark-recall, and report a 95% interval with every assumption stated
+  in a methods note. The deliverable is one interactive map
+  (outputs/maps/pressure_map.html): MPA boundary, blue cooperative
+  dots, red dark dots, a dark-density heat surface, and the hours
+  estimate with its uncertainty band.
+
+
+HOW SUCCESS IS MEASURED  (src/dark_vessel/evaluation/metrics.py)
+----------------------------------------------------------------
+Not one number — a breakdown that shows judgement:
+  * Detection F1 (200 m matching radius) — the headline.
+  * RECALL ON THE DARK SUBSET — the metric that actually matters;
+    catching non-broadcasting vessels is the entire point.
+  * Close-to-shore recall — coastal clutter is the hardest regime.
+  * Vessel vs non-vessel F1 — rejecting turbines/platforms/buoys.
+  * Fishing-class F1 and aggregate length error.
+  * An xView3-style aggregate for leaderboard comparability.
+
+
+WHAT'S IN THE REPO
+------------------
+  configs/default.yaml        — every knob in one place
+  src/dark_vessel/            — the library (data, models, inference,
+                                fusion, analysis, evaluation, viz)
+  scripts/00_smoke_test.py    — full pipeline on synthetic data, no
+                                download needed; run this first
+  scripts/01..06              — the real workflow, in order
+  INSTRUCTIONS.txt            — every step YOU must do (accounts,
+                                downloads, training runs)
+  LEARN_THE_CONCEPTS.txt      — the deep-dive teaching document
+  outputs/                    — tiles, checkpoints, predictions, maps
+
+
+SKILLS THIS PROJECT DEMONSTRATES
+--------------------------------
+Geospatial deep learning - SAR/remote-sensing fundamentals - large-
+raster engineering (tiling, windowed I/O, geo-referenced stitching) -
+heatmap/center-point detection - multi-task learning - data fusion
+(SAR x AIS) - extreme class imbalance - uncertainty-aware evaluation -
+turning model output into a decision-ready geospatial product.
+=======================================================================

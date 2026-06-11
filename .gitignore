@@ -1,0 +1,22 @@
+# Data and heavy artifacts — never commit these
+data/
+outputs/tiles/
+outputs/checkpoints/
+outputs/predictions/
+*.npz
+*.pt
+*.tif
+*.tar.gz
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

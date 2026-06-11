@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dark-vessel"
+version = "0.1.0"
+description = "Dark-vessel detection on xView3-SAR: SAR x AIS fusion for illegal-fishing pressure mapping"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]

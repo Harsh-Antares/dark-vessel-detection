@@ -1,0 +1,560 @@
+=======================================================================
+ DARK-VESSEL DETECTION — YOUR STEP-BY-STEP INSTRUCTIONS
+=======================================================================
+This file lists, in order, everything YOU need to do that the code
+cannot do for you (account registrations, large downloads, training
+runs, and judgement calls). Follow it top to bottom.
+
+All commands in this file are for the macOS TERMINAL.
+
+
+-----------------------------------------------------------------------
+ BEFORE YOU START — WHERE TO TYPE ALL THESE COMMANDS
+-----------------------------------------------------------------------
+Every command in this file is typed into the Terminal app on your Mac.
+
+1. OPEN TERMINAL
+   Press  cmd + space  (Spotlight), type "Terminal", press Enter.
+   A window opens showing a "prompt" — something like:
+       harshmeena@MacBook ~ %
+   That % (or $) means "I'm waiting for a command". You type a command
+   after it and press Enter (return) to run it.
+
+2. GO TO THE PROJECT FOLDER
+   The terminal always works "inside" one folder at a time. Move into
+   the project folder with the cd ("change directory") command:
+
+       cd /Users/harshmeena/Desktop/GITHUB/dark-vessel-detection
+
+   Type that exactly (or type "cd " and then drag the project folder
+   from Finder into the Terminal window — it pastes the path for you),
+   then press Enter. Check it worked by typing:
+
+       pwd
+
+   It should print /Users/harshmeena/Desktop/GITHUB/dark-vessel-detection.
+
+3. EVERY NEW TERMINAL WINDOW STARTS FRESH
+   If you close Terminal and come back later, you must do two things
+   again before running any project command:
+       cd /Users/harshmeena/Desktop/GITHUB/dark-vessel-detection
+       source .venv/bin/activate          (explained in Step 0 below)
+
+A note on copy-paste: copy commands from this file and paste them into
+Terminal with cmd+v, then press Enter. Lines shown ending with a
+backslash \ are ONE long command split for readability — paste the
+whole thing including the backslashes.
+
+
+-----------------------------------------------------------------------
+ STEP 0 — SET UP THE PYTHON ENVIRONMENT
+-----------------------------------------------------------------------
+What a "virtual environment" is: a private copy of Python that lives in
+a hidden folder called .venv inside this project, with exactly the
+libraries this project needs (PyTorch, rasterio, etc.) — so nothing
+clashes with anything else on your Mac. "Activating" it tells the
+current Terminal window "use THIS Python".
+
+A .venv was already created for you when the project was built, so
+normally you only ever need to ACTIVATE it. In Terminal (after cd-ing
+into the project folder — see above), run:
+
+    source .venv/bin/activate
+
+You'll know it worked because the prompt changes to show (.venv) at
+the start, like:
+    (.venv) harshmeena@MacBook dark-vessel-detection %
+
+That's it — the environment is "on" for this Terminal window. You must
+re-run this one line in every new Terminal window you open.
+
+ONLY IF .venv IS MISSING (e.g. you deleted it or cloned the repo on a
+new machine), recreate it — run these three lines one at a time:
+
+    python3 -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements.txt
+
+(The last line downloads all the libraries; it can take several
+minutes.)
+
+NOTE ON GPU: training on a laptop CPU will be very slow. Options:
+  - Apple Silicon Mac: PyTorch will automatically use the "mps" device.
+    Workable for small experiments.
+  - NVIDIA GPU machine / cloud (Colab Pro, Kaggle, Lambda, etc.):
+    install the CUDA build of PyTorch per pytorch.org instructions.
+    Realistically you want a GPU for the full training run.
+
+Then verify the whole pipeline is wired correctly WITHOUT any data:
+
+    python scripts/00_smoke_test.py
+
+This builds a tiny synthetic SAR scene, trains for 2 epochs, runs
+inference and evaluation. It should end with "SMOKE TEST PASSED".
+
+
+-----------------------------------------------------------------------
+ STEP 1 — REGISTER AND DOWNLOAD THE xVIEW3-SAR DATASET   [YOU ONLY]
+-----------------------------------------------------------------------
+The download page (https://iuu.xview.us, after creating a free account
+and accepting the terms) offers several things. Here is exactly what
+you need and what you can ignore:
+
+  NEED:
+    - "xView3 labels": train.csv and validation.csv
+    - Imagery: start with the TINY SET, later the VALIDATION SET and
+      a slice of the TRAINING SET (details below)
+  IGNORE (not used by this project):
+    - "SARFish labels" (GRD_*/SLC_*.csv — a different challenge)
+    - public.csv and the PUBLIC LEADERBOARD SET (only needed if you
+      ever submit to the leaderboard)
+    - ESA_xView3_sceneName_mapping.csv
+    - "Shoreline data" tarballs (we use the labels'
+      distance_from_shore_km and the scene land mask instead)
+
+1a. INSTALL THE DOWNLOAD TOOL (one-time)
+    The site provides downloads as link-files for the "aria2"
+    downloader (it resumes interrupted downloads and verifies hashes
+    automatically). In Terminal:
+
+        brew install aria2
+
+1b. DOWNLOAD THE TWO LABEL CSVs
+    On the page under "xView3 labels", click train.csv (11 MB) and
+    validation.csv (3.5 MB). They land in ~/Downloads. Move them into
+    the project (Terminal, from the project folder):
+
+        mkdir -p data/xview3/labels
+        mv ~/Downloads/train.csv ~/Downloads/validation.csv data/xview3/labels/
+
+1c. VERIFY THE LABEL FILES (recommended)
+    The site lists a SHA1 hash next to each file. Compute yours:
+
+        shasum -a 1 data/xview3/labels/train.csv
+        shasum -a 1 data/xview3/labels/validation.csv
+
+    Compare the printed hex string with the one on the website (the
+    first few and last few characters are enough). Mismatch = broken
+    download; re-download. (aria2 does this automatically for the
+    imagery, so this manual check is only for the CSVs.)
+
+1d. DOWNLOAD THE TINY SET FIRST (5 train + 2 validation scenes)
+    This subsample exists exactly so you can run the whole pipeline
+    before committing to terabytes. On the page, click the TINY SET
+    button — it saves a small file tiny.txt (a list of signed download
+    links) into ~/Downloads. Then in Terminal, from the project folder:
+
+        mkdir -p data/xview3/downloads
+        aria2c --input-file=$HOME/Downloads/tiny.txt \
+               --auto-file-renaming=false \
+               --continue=true \
+               --dir=data/xview3/downloads \
+               --dry-run=false
+
+    aria2 shows progress and verifies each file's hash as it goes.
+    IMPORTANT — LINKS EXPIRE: the links inside tiny.txt are temporary.
+    If the download stalls or you come back the next day, refresh the
+    download page in your browser, click the button again to get a
+    fresh tiny.txt, and re-run the same aria2c command — with
+    --continue=true it resumes where it left off instead of starting
+    over.
+
+1e. UNPACK THE SCENE ARCHIVES
+    Each scene arrives as <scene_id>.tar.gz. Unpack them one by one,
+    deleting each archive after extraction so you don't need double
+    the disk space (this is the site's own recommended command):
+
+        cd data/xview3/downloads
+        for file in *.tar.gz; do tar xzvf "${file}" && rm "${file}"; done
+        cd ../../..
+
+    (The last line takes you back to the project folder.)
+
+1f. SORT SCENES INTO train/ AND validation/
+    The tiny set mixes scenes from both splits in one folder. This
+    helper looks up each scene ID in the label CSVs and moves the
+    folder to the right place automatically:
+
+        python scripts/sort_scenes.py
+
+    After it runs, the layout must look like:
+
+        data/xview3/train/<scene_id>/VH_dB.tif, VV_dB.tif, ...
+        data/xview3/validation/<scene_id>/...
+        data/xview3/labels/train.csv
+        data/xview3/labels/validation.csv
+
+1g. SANITY-CHECK EVERYTHING
+
+        python scripts/01_explore_data.py
+
+    You should see label counts, the dark/cooperative split, and the
+    raster layers of one scene. Fix any "MISSING" file complaints
+    before moving on (file names are configurable in
+    configs/default.yaml).
+
+1h. SCALING UP LATER (after the pipeline works on the tiny set)
+    - VALIDATION SET (50 scenes, the cleanest labels): click the
+      VALIDATION SET button to get validation.txt, then repeat steps
+      1d-1f with --input-file=$HOME/Downloads/validation.txt.
+      Expect very roughly 50-150 GB.
+    - TRAINING SET (500+ scenes, ~2 TB — do NOT download it all):
+      click TRAINING SET to get train.txt, then EDIT the file to keep
+      only a subset. Each scene = 2 lines in the file, so for the
+      first 25 scenes keep the first 50 lines:
+
+          head -n 50 ~/Downloads/train.txt > ~/Downloads/train_subset.txt
+
+      then run aria2c with --input-file=$HOME/Downloads/train_subset.txt
+      and repeat 1e-1f. 25-50 training scenes is a sensible start;
+      add more later if the model is data-hungry.
+
+DISK SPACE: a single scene is ~1-4 GB unpacked. The tiny set is a few
+GB; check free space with the command:  df -h ~
+If space is tight, put the data on an external drive and change
+paths.data_root (and the two label paths) in configs/default.yaml to
+point there.
+
+
+-----------------------------------------------------------------------
+ STEP 2 — DOWNLOAD THE MPA POLYGONS (WDPA)               [YOU ONLY]
+-----------------------------------------------------------------------
+Do this AFTER you know where your scenes are (run step 1g first): you
+only need protected-area polygons for the waters your scenes cover,
+and a single-country download is hundreds of times smaller than the
+global database.
+
+2a. FIND OUT WHERE YOUR SCENES ARE
+    Your label CSVs contain each detection's longitude/latitude. From
+    the project folder (with the venv active), paste this ONE line:
+
+        python -c "import pandas as pd; print(pd.read_csv('data/xview3/labels/validation.csv').groupby('scene_id')[['detect_lat','detect_lon']].mean().round(2))"
+
+    It prints one row per scene with its average latitude/longitude.
+    Paste a few of those lat/lon pairs into Google Maps to see which
+    country's waters they are (much of xView3 is around Europe —
+    North Sea, Bay of Biscay, Iceland, the Adriatic).
+
+2b. DOWNLOAD THAT COUNTRY'S PROTECTED AREAS AS SHAPEFILE
+    On https://www.protectedplanet.net use the search (magnifying
+    glass) to find the country, open its page, click Download and
+    choose SHP. You may be asked for name/email — it's free.
+    What the format choices mean:
+      - SHP (shapefile): polygons in a zip — WHAT WE WANT.
+      - CSV: attribute table only, NO map geometry — useless here.
+      - File Geodatabase / ESRI Web Service: ESRI-specific — skip.
+    (Avoid the global download on the WDPA homepage unless you really
+    need it: it's gigabytes and arrives split into three sub-archives
+    that you'd have to merge yourself.)
+
+2c. UNPACK AND PLACE IT
+    The download is a .zip; double-click it in Finder (or `unzip` in
+    Terminal). Inside are several files that together form one
+    "shapefile" (.shp, .dbf, .shx, .prj ... sometimes split into
+    *_0, *_1, *_2 sub-zips — unzip those too and use the *polygons*
+    one). Move the whole folder into the project under data/wdpa/.
+
+2d. POINT THE CONFIG AT THE .shp FILE
+    Open configs/default.yaml (TextEdit is fine, or `open -e
+    configs/default.yaml`) and change wdpa_path to the actual file,
+    e.g.:
+
+        wdpa_path: "data/wdpa/WDPA_xxx_ITA_shp/WDPA_xxx-polygons.shp"
+
+    If your scenes straddle two countries' waters (the Adriatic is the
+    classic case — Italy on one side, Croatia on the other), download
+    BOTH countries and list both files:
+
+        wdpa_path:
+          - "data/wdpa/WDPA_xxx_ITA_shp/WDPA_xxx-polygons.shp"
+          - "data/wdpa/WDPA_xxx_HRV_shp/WDPA_xxx-polygons.shp"
+
+    The loader reads .shp and .gpkg equally well; keep the other
+    sibling files (.dbf etc.) next to the .shp — they're part of it.
+
+TIP — picking your "killer artifact" MPA: among the areas your scenes
+cover, prefer a well-known, NAMED marine protected area. "Estimated X
+dark vessels inside [recognisable MPA]" is what makes the final map
+land with people.
+
+
+-----------------------------------------------------------------------
+ STEP 3 — BUILD THE TRAINING TILES
+-----------------------------------------------------------------------
+Run the tiling pipeline over both splits.
+
+If you only have the TINY SET so far (7 scenes total), just run both
+splits in full — they ARE small:
+
+    python scripts/02_build_tiles.py --split train
+    python scripts/02_build_tiles.py --split validation
+
+Once you've downloaded more scenes (step 1h), start SMALL to validate
+the loop, then scale up:
+
+    python scripts/02_build_tiles.py --split validation --max-scenes 5
+    python scripts/02_build_tiles.py --split train --max-scenes 10
+
+Then, once happy, the full runs (these take hours and a lot of disk —
+each kept chip is a compressed .npz):
+
+    python scripts/02_build_tiles.py --split train
+    python scripts/02_build_tiles.py --split validation
+
+Output: outputs/tiles/chips_train.csv and chips_validation.csv plus the
+chip files. The script prints how many chips contain vessels — if that
+number is 0, something is wrong with the labels; stop and investigate.
+
+
+-----------------------------------------------------------------------
+ STEP 4 — TRAIN THE DETECTOR
+-----------------------------------------------------------------------
+Quick smoke run first (5 epochs, make sure loss decreases and val F1
+is above zero):
+
+    python scripts/03_train.py --epochs 5
+
+Full run:
+
+    python scripts/03_train.py
+
+  - Watch the printed validation P/R/F1 each epoch.
+  - Best checkpoint is saved to outputs/checkpoints/best.pt.
+  - On a single modern GPU expect roughly several hours to a day
+    depending on how many chips you built. On CPU: don't.
+  - If you run out of GPU memory: lower train.batch_size in the config
+    and raise train.grad_accum_steps to compensate.
+
+JUDGEMENT CALLS YOU MAY NEED TO MAKE (config values to tune):
+  - inference.score_threshold (0.3-0.5): lower = more recall, more
+    false positives. For the dark-vessel mission, favour recall.
+  - train.positive_fraction: 0.75 is a good start.
+  - model.encoder: resnet34 default; resnet50 if you have GPU headroom.
+
+
+-----------------------------------------------------------------------
+ STEP 5 — RUN INFERENCE ON FULL SCENES
+-----------------------------------------------------------------------
+Pick validation scenes (ideally ones covering your chosen MPA):
+
+    python scripts/04_predict_scene.py --scene <SCENE_ID> --split validation
+    # or do every validation scene (slow but thorough):
+    python scripts/04_predict_scene.py --all --split validation
+
+Output: outputs/predictions/<scene_id>_detections.csv
+
+
+-----------------------------------------------------------------------
+ STEP 6 — DARK/COOPERATIVE SPLIT + EVALUATION
+-----------------------------------------------------------------------
+    python scripts/05_dark_split_and_eval.py --split validation
+
+Read the report carefully. The numbers to care about (in order):
+  1. DARK recall  — the entire point of the project.
+  2. Detection F1 — the headline.
+  3. Near-shore recall — the hardest regime.
+  4. Vessel / fishing classification F1, length score.
+
+WRITE DOWN the dark-recall value — you need it in step 7.
+Output: outputs/predictions/<scene_id>_detections_dark.csv
+
+
+-----------------------------------------------------------------------
+ STEP 7 — THE KILLER ARTIFACT: MPA PRESSURE MAP
+-----------------------------------------------------------------------
+Decide your observation window: if you used 3 scenes (passes) of the
+same area spanning, say, two weeks, the window is 336 hours.
+
+    python scripts/06_mpa_pressure_map.py \
+        --detections outputs/predictions/<scene_id>_detections_dark.csv \
+        --window-hours 168 \
+        --dark-recall <value from step 6>
+
+(Pass several --detections files if you have multiple passes over the
+same MPA — that strengthens the estimate a lot.)
+
+Outputs in outputs/maps/:
+  - pressure_map.html   <- THE map. Open it in a browser.
+  - mpa_summary.csv     <- per-MPA dark/cooperative table.
+  - methods_note.txt    <- the assumptions behind the hours estimate.
+
+
+-----------------------------------------------------------------------
+ STEP 8 — POLISH & PRESENT                                [YOU ONLY]
+-----------------------------------------------------------------------
+1. Record the 2-3 minute walkthrough video (screen recording):
+   raw SAR scene -> tiles -> detections -> dark/cooperative split ->
+   the final map. QuickTime (cmd+shift+5) is enough.
+2. Take a clean screenshot of pressure_map.html for the README.
+3. Put the repo on GitHub — full beginner walkthrough in STEP 9 below.
+4. CV bullet (adapt): "Built an end-to-end SAR vessel-detection
+   pipeline on xView3 (1k Sentinel-1 scenes, 220k labels): giant-raster
+   tiling with geo-referenced stitching, a center-heatmap detector with
+   vessel/fishing/length heads, and a SAR x AIS fusion step isolating
+   non-broadcasting 'dark' vessels — producing a density map of
+   estimated illegal-fishing pressure inside a marine protected area."
+5. In every write-up, state plainly: "dark" is a data-fusion result
+   (no AIS correlation), NOT something visible in the radar image.
+   This honesty is a feature — it reads as senior.
+
+
+-----------------------------------------------------------------------
+ STEP 9 — PUT THE PROJECT ON GITHUB                       [YOU ONLY]
+-----------------------------------------------------------------------
+Quick vocabulary: GIT is the version-control tool on your Mac (already
+installed — you have it). GITHUB is the website that hosts a copy of
+your project online. You "commit" snapshots locally with git, then
+"push" them up to GitHub.
+
+The .gitignore file already in the project makes git automatically skip
+the huge stuff (data/, tiles, checkpoints, .venv) — only code and docs
+get uploaded. Don't delete that file.
+
+9a. Create a GitHub account (skip if you have one)
+    Go to https://github.com and sign up. Your username will be part
+    of your project's URL, so pick something you'd put on a CV.
+
+9b. Install the GitHub CLI (one-time; easiest way to log in)
+    In Terminal (any folder):
+
+        brew install gh
+
+    Then connect it to your account:
+
+        gh auth login
+
+    Answers to its questions: "GitHub.com" -> "HTTPS" ->
+    "Login with a web browser", then press Enter, copy the one-time
+    code it shows, and paste it into the browser page that opens.
+
+9c. Turn the project folder into a git repository and make the first
+    commit. In Terminal, inside the project folder:
+
+        cd /Users/harshmeena/Desktop/GITHUB/dark-vessel-detection
+        git init
+        git add -A
+        git commit -m "Dark-vessel detection on xView3-SAR"
+
+    (git add -A stages every non-ignored file; git commit records the
+    snapshot. If git complains it doesn't know who you are, run the
+    two `git config --global` lines it suggests — though on this Mac
+    your name/email are already configured.)
+
+9d. Create the repository on GitHub and push, in one command:
+
+        gh repo create dark-vessel-detection --public --source=. --push
+
+    --public makes it visible to anyone (what you want for a CV
+    project; use --private to hide it). When it finishes it prints
+    your repo URL, e.g. https://github.com/<your-username>/dark-vessel-detection
+
+    ALTERNATIVE without the gh CLI: on github.com click "+" -> "New
+    repository", name it dark-vessel-detection, create it EMPTY (no
+    README — you already have one), then:
+
+        git remote add origin https://github.com/<your-username>/dark-vessel-detection.git
+        git branch -M main
+        git push -u origin main
+
+    (When HTTPS push asks for a password, GitHub requires a Personal
+    Access Token, not your account password — Settings -> Developer
+    settings -> Personal access tokens. This is exactly the hassle
+    `gh auth login` avoids.)
+
+9e. Saving future changes — after you edit anything, the cycle is:
+
+        git add -A
+        git commit -m "describe what you changed"
+        git push
+
+9f. Make the GitHub page look good: on your repo page, check that
+    README.md renders nicely, and once you have the pressure map, add
+    a screenshot: put the image in the repo (e.g. assets/map.png),
+    reference it in README.md, commit and push.
+
+
+-----------------------------------------------------------------------
+ STEP 10 — SET UP AND RUN THE PROJECT FROM GITHUB
+-----------------------------------------------------------------------
+Once the project is on GitHub, you (or anyone) can recreate it on any
+machine. This matters for YOU mainly because training wants an NVIDIA
+GPU, which your Mac doesn't have — so the typical workflow is: develop
+on the Mac, push to GitHub, then pull and train on a GPU machine.
+
+10a. On any new computer (or after deleting the local copy):
+
+        git clone https://github.com/<your-username>/dark-vessel-detection.git
+        cd dark-vessel-detection
+        python3 -m venv .venv
+        source .venv/bin/activate
+        pip install -r requirements.txt
+        python scripts/00_smoke_test.py     # should end: SMOKE TEST PASSED
+
+     Remember: GitHub only stores the CODE. The data (xView3, WDPA)
+     is ignored by git on purpose — you re-download it on each machine
+     per Steps 1-2, or keep it on an external drive and point
+     configs/default.yaml at it.
+
+10b. Training on Google Colab (free/cheap GPU) — the practical route:
+     1. Go to https://colab.research.google.com, New Notebook,
+        then menu Runtime -> Change runtime type -> select a GPU.
+     2. In a notebook cell, set up the project (the ! runs a terminal
+        command inside Colab):
+
+            !git clone https://github.com/<your-username>/dark-vessel-detection.git
+            %cd dark-vessel-detection
+            !pip install -r requirements.txt
+
+     3. Upload your built tiles to Google Drive (the outputs/tiles
+        folder from Step 3 — NOT the raw scenes), then in Colab:
+
+            from google.colab import drive
+            drive.mount('/content/drive')
+
+        and edit configs/default.yaml so tiles_dir points at the
+        Drive path (e.g. /content/drive/MyDrive/tiles).
+     4. Train:
+
+            !python scripts/03_train.py
+
+     5. When done, download outputs/checkpoints/best.pt (Files panel
+        on the left, right-click -> Download) and put it in
+        outputs/checkpoints/ on your Mac. Inference and the map steps
+        (4-7) run fine on the Mac.
+     Colab disconnects idle sessions — for long runs, save checkpoints
+     to Drive (set checkpoints_dir to a Drive path) so progress
+     survives a disconnect.
+
+10c. Other GPU options, same pattern (clone -> venv -> pip install ->
+     download/point at data -> python scripts/03_train.py):
+     Kaggle notebooks (free GPU hours, xView3 mirrors sometimes exist
+     as Kaggle datasets), or a rented box (Lambda, RunPod, vast.ai)
+     where you SSH in and run exactly the commands from 10a.
+
+
+-----------------------------------------------------------------------
+ OPTIONAL STRETCH GOALS (after the core works)
+-----------------------------------------------------------------------
+- Multiple Sentinel-1 passes over one MPA (temporal stacking) to
+  tighten the effort estimate.
+- A live AIS feed (e.g. aisstream.io has a free tier) + fresh
+  Sentinel-1 scenes from the Copernicus Data Space (free account) to
+  demonstrate the dark split on CURRENT data using
+  fusion/ais_correlation.correlate_with_ais (live mode).
+- Self-supervised pretraining on unlabelled SAR chips.
+- Cross-check dark detections against cloud-free Sentinel-2 optical.
+
+
+-----------------------------------------------------------------------
+ TROUBLESHOOTING QUICK LIST
+-----------------------------------------------------------------------
+- "No chips with vessels": scene_id mismatch between folders and label
+  CSV, or you tiled scenes that have no labels. Check 01_explore_data.
+- rasterio install errors: `pip install rasterio` should ship wheels;
+  if not, `brew install gdal` first.
+- Training F1 stays 0 for many epochs: normal for the first 1-3 epochs;
+  if it persists, lower inference.score_threshold to 0.25 and check a
+  chip visually (np.load a chip, matplotlib imshow image[0]).
+- Out of GPU memory: smaller batch_size, grad_accum_steps=2 or 4,
+  or tile_size 800 instead of 1024 (rebuild tiles).
+=======================================================================
