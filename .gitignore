@@ -1,5 +1,6 @@
 # Data and heavy artifacts — never commit these
-data/
+# (leading slash anchors to the repo root, so src/dark_vessel/data/ is NOT excluded)
+/data/
 outputs/tiles/
 outputs/checkpoints/
 outputs/predictions/
@@ -20,3 +21,4 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+*.tar

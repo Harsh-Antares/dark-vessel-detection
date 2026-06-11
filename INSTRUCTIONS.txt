@@ -495,35 +495,49 @@ on the Mac, push to GitHub, then pull and train on a GPU machine.
      per Steps 1-2, or keep it on an external drive and point
      configs/default.yaml at it.
 
-10b. Training on Google Colab (free/cheap GPU) — the practical route:
-     1. Go to https://colab.research.google.com, New Notebook,
-        then menu Runtime -> Change runtime type -> select a GPU.
-     2. In a notebook cell, set up the project (the ! runs a terminal
-        command inside Colab):
+10b. Training on Google Colab (free/cheap GPU) — the practical route.
+     A ready-made notebook is in the repo: notebooks/train_colab.ipynb.
+     The workflow is three moves:
 
-            !git clone https://github.com/<your-username>/dark-vessel-detection.git
-            %cd dark-vessel-detection
-            !pip install -r requirements.txt
+     1. ON YOUR LAPTOP — pack the tiles into one portable archive
+        (all training chips + a 600-chip validation sample; the full
+        18 GB validation split stays home):
 
-     3. Upload your built tiles to Google Drive (the outputs/tiles
-        folder from Step 3 — NOT the raw scenes), then in Colab:
+            python scripts/make_colab_bundle.py
 
-            from google.colab import drive
-            drive.mount('/content/drive')
+        This writes outputs/colab_tiles.tar (a few GB) and the chip
+        paths inside it are relative, so it works on any machine.
 
-        and edit configs/default.yaml so tiles_dir points at the
-        Drive path (e.g. /content/drive/MyDrive/tiles).
-     4. Train:
+     2. UPLOAD TO GOOGLE DRIVE — at https://drive.google.com create a
+        folder named exactly:  darkvessel
+        and upload colab_tiles.tar into it (drag and drop; takes a
+        while on home upload speeds).
 
-            !python scripts/03_train.py
+     3. OPEN THE NOTEBOOK IN COLAB — go to:
 
-     5. When done, download outputs/checkpoints/best.pt (Files panel
-        on the left, right-click -> Download) and put it in
-        outputs/checkpoints/ on your Mac. Inference and the map steps
-        (4-7) run fine on the Mac.
-     Colab disconnects idle sessions — for long runs, save checkpoints
-     to Drive (set checkpoints_dir to a Drive path) so progress
-     survives a disconnect.
+            https://colab.research.google.com/github/<your-username>/dark-vessel-detection/blob/main/notebooks/train_colab.ipynb
+
+        (Colab opens notebooks straight from GitHub.) Then:
+          - Runtime -> Change runtime type -> T4 GPU -> Save
+          - Runtime -> Run all
+          - approve the Google Drive permission popup when it appears
+        The notebook clones your repo, unpacks the bundle, and trains
+        with checkpoints saved to Drive (darkvessel/checkpoints/), so
+        a Colab disconnect can't lose your progress.
+
+     AFTERWARDS: download best.pt from Drive -> darkvessel ->
+     checkpoints and put it at outputs/checkpoints/best.pt on your
+     laptop. Steps 5-7 (inference, dark split, map) run fine locally.
+
+     NOTES:
+       - 'CUDA out of memory' during training: edit the training cell,
+         change --batch-size 8 to 4, re-run that cell.
+       - Re-running after a disconnect: rename best.pt/last.pt on
+         Drive first (a fresh run overwrites them with early, worse
+         checkpoints).
+       - Free-tier Colab limits GPU time per day; if the 40-epoch run
+         doesn't fit, train fewer epochs (--epochs 25 still gets you
+         most of the way) or upgrade briefly.
 
 10c. Other GPU options, same pattern (clone -> venv -> pip install ->
      download/point at data -> python scripts/03_train.py):

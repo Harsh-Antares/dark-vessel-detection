@@ -23,12 +23,21 @@ def main():
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=None)
+    ap.add_argument("--tiles-dir", default=None,
+                    help="override cfg.paths.tiles_dir (e.g. an extracted bundle)")
+    ap.add_argument("--checkpoints-dir", default=None,
+                    help="override checkpoint folder (e.g. a Google Drive path "
+                         "on Colab so checkpoints survive a disconnect)")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.epochs:
         cfg.train.epochs = args.epochs
     if args.batch_size:
         cfg.train.batch_size = args.batch_size
+    if args.tiles_dir:
+        cfg.paths.tiles_dir = args.tiles_dir
+    if args.checkpoints_dir:
+        cfg.paths.checkpoints_dir = args.checkpoints_dir
 
     tiles = Path(cfg.paths.tiles_dir)
     train_index = tiles / "chips_train.csv"
