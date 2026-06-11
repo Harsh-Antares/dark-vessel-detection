@@ -61,10 +61,16 @@ def mpa_summary(joined: gpd.GeoDataFrame, mpas: gpd.GeoDataFrame,
     computing km^2 in lon/lat degrees would be meaningless.
     """
     area_km2 = mpas.to_crs("ESRI:54009").geometry.area / 1e6
-    areas = pd.Series(area_km2.values, index=mpas["mpa_name"].values)
+    # One MPA can span several WDPA polygons (zones); sum them per name.
+    areas = (pd.Series(area_km2.values, index=mpas["mpa_name"].values)
+             .groupby(level=0).sum())
 
     rows = []
     inside = joined.dropna(subset=["mpa_name"])
+    # A detection inside two overlapping zones of the same MPA must count once.
+    inside = (inside.reset_index()
+              .drop_duplicates(subset=["index", "mpa_name"])
+              .set_index("index"))
     for name, grp in inside.groupby("mpa_name"):
         is_dark = grp["is_dark"]
         n_dark = int((is_dark == 1.0).sum())
