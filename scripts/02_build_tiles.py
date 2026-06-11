@@ -34,6 +34,10 @@ def main():
     ap.add_argument("--split", choices=["train", "validation"], required=True)
     ap.add_argument("--max-scenes", type=int, default=None,
                     help="limit scenes for a quick first run")
+    ap.add_argument("--append", action="store_true",
+                    help="keep existing index entries for scenes not present "
+                         "on disk (batch workflow: download -> tile -> delete "
+                         "raw scenes -> repeat)")
     args = ap.parse_args()
     cfg = load_config(args.config)
     t = cfg.tiling
@@ -96,6 +100,13 @@ def main():
 
     index = pd.DataFrame(index_rows)
     index_path = Path(cfg.paths.tiles_dir) / f"chips_{args.split}.csv"
+    if args.append and index_path.exists():
+        old = pd.read_csv(index_path)
+        tiled_now = {d.name for d in scene_dirs}
+        kept = old[~old["scene_id"].isin(tiled_now)]
+        index = pd.concat([kept, index], ignore_index=True)
+        print(f"--append: kept {len(kept)} chips from "
+              f"{kept['scene_id'].nunique()} previously tiled scene(s)")
     index.to_csv(index_path, index=False)
     print(f"\nWrote {len(index):,} chips "
           f"({int((index['n_vessels'] > 0).sum()):,} contain vessels)")

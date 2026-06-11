@@ -1,0 +1,9 @@
+MPA: Isole Tremiti
+
+Dark-vessel pressure estimate
+  snapshots (SAR passes): 1
+  mean dark vessels present per pass: 25.16  [16.73, 36.77] (95% CI)
+  observation window: 24 h
+  estimated dark-vessel-hours: 604  [401, 883]
+  detector dark-recall correction: 0.16
+  ASSUMPTIONS: (1) dark-vessel presence is stationary over the window; (2) each SAR pass is an unbiased instantaneous sample; (3) counts corrected by measured dark-recall; (4) 'hours' = vessel-presence-hours, not confirmed fishing time. This is an extrapolation, not a measurement.
