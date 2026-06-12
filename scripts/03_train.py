@@ -28,6 +28,9 @@ def main():
     ap.add_argument("--checkpoints-dir", default=None,
                     help="override checkpoint folder (e.g. a Google Drive path "
                          "on Colab so checkpoints survive a disconnect)")
+    ap.add_argument("--resume-from", default=None,
+                    help="warm-start model weights from an existing .pt "
+                         "checkpoint (continue after a Colab disconnect)")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.epochs:
@@ -46,7 +49,7 @@ def main():
         if not p.exists():
             raise SystemExit(f"Missing {p} — run scripts/02_build_tiles.py first.")
 
-    train(cfg, str(train_index), str(val_index))
+    train(cfg, str(train_index), str(val_index), resume_from=args.resume_from)
 
 
 if __name__ == "__main__":

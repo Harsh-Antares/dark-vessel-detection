@@ -79,7 +79,7 @@ def evaluate(model, loader, device, score_threshold: float) -> dict:
     return {"precision": precision, "recall": recall, "f1": f1}
 
 
-def train(cfg, train_index: str, val_index: str):
+def train(cfg, train_index: str, val_index: str, resume_from: str | None = None):
     torch.manual_seed(cfg.train.seed)
     np.random.seed(cfg.train.seed)
     device = pick_device()
@@ -107,6 +107,12 @@ def train(cfg, train_index: str, val_index: str):
                             shuffle=False, num_workers=cfg.train.num_workers)
 
     model = DarkVesselNet(cfg).to(device)
+    if resume_from:
+        ckpt = torch.load(resume_from, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        print(f"Resumed weights from {resume_from} "
+              f"(epoch {ckpt.get('epoch', '?')}, "
+              f"F1 {ckpt.get('metrics', {}).get('f1', float('nan')):.3f})")
     criterion = MultiTaskLoss(cfg)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.train.lr,
                                   weight_decay=cfg.train.weight_decay)
