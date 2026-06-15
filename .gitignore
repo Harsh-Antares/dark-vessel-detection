@@ -22,3 +22,6 @@ dist/
 .idea/
 .vscode/
 *.tar
+
+# Loose screenshots in repo root (move into assets/ with proper names)
+/Screenshot*.png
