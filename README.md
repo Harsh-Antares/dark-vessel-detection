@@ -110,7 +110,6 @@ running inference, the dark split, and the maps.
 
 - **[INSTRUCTIONS.txt](INSTRUCTIONS.txt)** — every step to run, in order.
 - **[PROJECT_EXPLAINED.txt](PROJECT_EXPLAINED.txt)** — what the project is and how each piece fits.
-- **[LEARN_THE_CONCEPTS.txt](LEARN_THE_CONCEPTS.txt)** — the long version, explaining the ideas from scratch: how SAR works, the geospatial plumbing, why a heatmap detector, focal loss, data fusion, the uncertainty maths, and how to evaluate it honestly.
 - **[RESULTS.md](RESULTS.md)** — the full numbers and the reasoning behind the hours estimates.
 
 ## What this touched
