@@ -1,118 +1,130 @@
 # Dark-Vessel Detection on SAR
 
-**Finding the ships that don't want to be found.**
+Finding the fishing boats that switch off their transponders to hide.
 
-Roughly 1 in 5 large commercial fishing vessels operates "dark" — present on
-radar but broadcasting no AIS identity — and a disproportionate share of that
-activity happens inside protected waters. Satellite radar (SAR) sees through
-cloud and darkness and doesn't care whether a ship is broadcasting.
+About one in five large fishing vessels goes "dark" at times — it's physically
+there on the water but broadcasting no AIS identity signal — and a lot of that
+happens inside protected waters where fishing isn't allowed. Optical
+satellites can't help much (clouds, night), and AIS by definition can't see a
+boat that's stopped broadcasting. Radar can: Sentinel-1 images the sea day or
+night, through cloud, whether or not a ship is cooperating.
 
-This project trains a detector on **xView3-SAR** (Sentinel-1 scenes, 220k+
-labelled vessels), separates **dark vs. cooperative** vessels via SAR × AIS
-data fusion, and turns the detections into a map of **estimated
-illegal-fishing pressure inside marine protected areas (MPAs)** of the
-Adriatic Sea — with uncertainty bounds.
+This project trains a detector on the **xView3-SAR** dataset, then does
+something the basic "detect ships, report a score" version doesn't: it figures
+out which detected vessels were *not* broadcasting AIS, and maps where those
+dark vessels show up inside marine protected areas in the Adriatic.
 
-> The radar sees it. AIS doesn't. **That discrepancy is the signal.**
+The one-line idea behind the whole thing: **the radar sees the boat, AIS
+doesn't, and that mismatch is what we're actually after.**
 
-**The honest technical note (stated up front):** "dark" is *not* a visual
-class — a dark trawler and a cooperative trawler scatter microwaves
-identically. Darkness is the *result of a data-fusion step*: a SAR detection
-that fails to correlate with any AIS message in a space–time window. The
-machine learning earns its keep where ML is genuinely needed — high-recall
-detection of tiny point targets, vessel/fishing classification, and length
-estimation. The dark/cooperative split is data fusion, not pixel-reading.
+One thing worth being clear about, because it's easy to overclaim: you can't
+look at a radar image and tell whether a boat's transponder is on. A dark
+trawler and a cooperative trawler look identical to radar. "Dark" isn't
+something the neural network sees — it's what you get *after* you cross-check a
+radar detection against the AIS record and find no match. So the machine
+learning does the part that genuinely needs it (finding small, faint boats and
+sorting vessels from fishing boats from fixed structures), and the dark label
+comes from data fusion on top of that.
 
 ---
 
-## Headline result
+## What came out of it
 
-A trained detector, run on Adriatic Sentinel-1 scenes, flags non-broadcasting
-("dark") vessels and places them inside named marine protected areas:
+I ran the trained model on a few Adriatic scenes and looked at where the dark
+vessels landed:
 
-| Map | What it shows |
+| Area | What's there |
 |---|---|
-| **Isole Tremiti** (Italy) | **5 dark fishing vessels** detected inside the Isole Tremiti MPA (dark ratio 0.63). Estimated **≈540 dark-vessel-hours** over a 24 h window *(95% CI 350–810)*. |
-| **Po delta** (Emilia-Romagna) | **34 dark vessels** scene-wide — the highest dark pressure observed — with **4 inside the Sacca di Goro / Po-delta reserves**. Estimated **≈290 dark-vessel-hours** *(95% CI 160–490)*. |
+| **Isole Tremiti** (Italy) | 5 dark fishing vessels sitting inside the Tremiti marine reserve (out of 8 boats total in the reserve). Rough estimate: ~540 dark-vessel-hours over a 24-hour window, though the range is wide (350–810). |
+| **Po delta** (Emilia-Romagna) | The busiest scene for dark activity — 34 dark vessels in total, 4 of them inside the Sacca di Goro / Po-delta reserves. ~290 dark-vessel-hours (160–490). |
 
-![Dark vessels inside the Isole Tremiti MPA](assets/map_tremiti.png)
-*Red = dark (no AIS). Blue = cooperative (AIS-matched). Green = MPA boundary.
-The heat-surface shows dark-vessel density; the banner reports the
-dark-vessel-hours estimate with its 95% interval.*
+![Dark vessels inside the Isole Tremiti reserve](assets/map_tremiti.png)
+
+*Red dots are dark vessels (no AIS match), blue are cooperative (AIS found),
+green outlines are the protected-area boundaries. The glow is dark-vessel
+density, and the box up top gives the dark-vessel-hours estimate with its
+uncertainty range.*
 
 ![Dark vessels in the Po-delta reserves](assets/map_ravenna.png)
 
-All effort figures are **uncertainty-bounded extrapolations**, not
-measurements — see [RESULTS.md](RESULTS.md) for every assumption.
+The "hours" figures are extrapolations from single snapshots, not
+measurements, and I've tried to be upfront about every assumption behind them
+in [RESULTS.md](RESULTS.md).
 
 ---
 
-## Evaluation — more than a single F1
+## How well does it actually work?
 
-Measured on held-out validation scenes the model never saw in training:
+These are measured on validation scenes the model never trained on:
 
-| Metric | Baseline (5 train scenes) | Final (29 train scenes) |
+| Metric | Baseline (5 training scenes) | Final (29 training scenes) |
 |---|---|---|
-| Detection F1 (≤200 m) | 0.50 – 0.68 | 0.57 – **0.69** |
-| **Dark recall** | 0.16 – 0.33 | **0.22 – 0.34** |
+| Detection F1 (within 200 m) | 0.50 – 0.68 | 0.57 – 0.69 |
+| Dark recall | 0.16 – 0.33 | 0.22 – 0.34 |
 | Detection precision | ~0.95 | 0.78 – 0.95 |
 | Fishing-class F1 | — | 0.90 – 0.96 |
 
-**The finding that matters:** detection *recall* is ~0.55 but **dark recall
-is ~0.30** — the model reliably finds vessels in general yet misses most
-small, faint *dark* fishing boats, which is exactly what dark vessels
-physically are. This gap (and the very low near-shore recall) is the
-mission-critical number that the standard xView3 aggregate metric never
-reports. More training data lifted the hardest scene most (+40% relative dark
-recall) and left the near-saturated scenes flat — the expected shape.
+The honest headline isn't the detection F1, it's the dark recall. Overall the
+model finds about half the vessels, but on the *dark* subset specifically it
+only catches around a third — because dark vessels tend to be the small, faint
+fishing boats that are hardest to see in radar. That gap is the number that
+actually matters for the mission, and it's the one the standard xView3 score
+doesn't report. Adding more training data helped most on the hardest scene
+(dark recall there went up ~40%) and barely moved the scenes that were already
+near their ceiling, which is about what you'd expect.
 
-Full per-scene breakdown and the baseline-vs-final comparison: [RESULTS.md](RESULTS.md).
+There's a fuller breakdown, including the per-scene numbers and the
+before/after comparison, in [RESULTS.md](RESULTS.md).
 
 ---
 
-## Pipeline
+## How it's built
 
-| Stage | What | Where |
+| Stage | What it does | Where |
 |---|---|---|
-| 1 | Tiling: windowed reads, overlap, dB normalisation, land masking, geo-referencing | `src/dark_vessel/data/tiling.py` |
-| 2 | Center-heatmap detector (U-Net + ResNet encoder, focal loss) | `src/dark_vessel/models/` |
-| 3 | Attribute heads: vessel / fishing / length | `src/dark_vessel/models/model.py` |
-| 4 | SAR × AIS correlation → dark / cooperative | `src/dark_vessel/fusion/ais_correlation.py` |
-| 5 | WDPA join → MPA pressure map + dark-vessel-hours with 95% CI | `src/dark_vessel/analysis/`, `visualization/` |
+| 1 | Tiling: reads big scenes in windows, overlaps tiles, normalises to dB, masks land, keeps everything geo-referenced | `src/dark_vessel/data/tiling.py` |
+| 2 | The detector: a U-Net with a ResNet encoder that predicts a heatmap of vessel centres | `src/dark_vessel/models/` |
+| 3 | Extra heads on top: vessel-or-not, fishing-or-not, length | `src/dark_vessel/models/model.py` |
+| 4 | Matching detections against AIS to split dark from cooperative | `src/dark_vessel/fusion/ais_correlation.py` |
+| 5 | Joining to protected-area polygons and building the map + the hours estimate | `src/dark_vessel/analysis/`, `visualization/` |
 
 ---
 
-## Quick start
+## Getting started
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Verify the whole pipeline on synthetic data (no dataset needed):
+# Runs the whole pipeline on fake data, so you can check it works
+# before downloading anything:
 python scripts/00_smoke_test.py
 ```
 
-Then follow **[INSTRUCTIONS.txt](INSTRUCTIONS.txt)** step by step — dataset
-registration/download (xView3, WDPA), tiling, training (locally or on the
-Colab GPU notebook in `notebooks/`), inference, the dark split, and the maps.
+From there, [INSTRUCTIONS.txt](INSTRUCTIONS.txt) walks through everything in
+order — getting the data (xView3 and the WDPA protected-area boundaries),
+tiling, training (on your machine or with the Colab notebook in `notebooks/`),
+running inference, the dark split, and the maps.
 
-## Documentation
+## The other docs
 
-- **[INSTRUCTIONS.txt](INSTRUCTIONS.txt)** — every step you run, in order.
-- **[PROJECT_EXPLAINED.txt](PROJECT_EXPLAINED.txt)** — what the project is and how each stage works.
-- **[LEARN_THE_CONCEPTS.txt](LEARN_THE_CONCEPTS.txt)** — deep-dive teaching guide: SAR physics, geospatial engineering, heatmap detection, focal loss, data fusion, bootstrap uncertainty, mission-aligned evaluation.
-- **[RESULTS.md](RESULTS.md)** — full numbers, the effort-estimate method, and every assumption.
+- **[INSTRUCTIONS.txt](INSTRUCTIONS.txt)** — every step to run, in order.
+- **[PROJECT_EXPLAINED.txt](PROJECT_EXPLAINED.txt)** — what the project is and how each piece fits.
+- **[LEARN_THE_CONCEPTS.txt](LEARN_THE_CONCEPTS.txt)** — the long version, explaining the ideas from scratch: how SAR works, the geospatial plumbing, why a heatmap detector, focal loss, data fusion, the uncertainty maths, and how to evaluate it honestly.
+- **[RESULTS.md](RESULTS.md)** — the full numbers and the reasoning behind the hours estimates.
 
-## Skills demonstrated
+## What this touched
 
-Geospatial deep learning · SAR/remote-sensing fundamentals · large-raster
-engineering (tiling, windowed I/O, geo-referenced stitching) ·
-heatmap/center-point detection · multi-task learning · data fusion (SAR × AIS)
-· extreme class imbalance · uncertainty-aware evaluation · turning model
-output into a decision-ready geospatial product.
+SAR and remote-sensing basics, working with rasters too big for memory
+(tiling, windowed reads, keeping everything geo-referenced), heatmap/point
+detection, multi-task learning, fusing two very different data sources
+(radar and AIS), dealing with extreme class imbalance, evaluating with
+uncertainty instead of a single number, and turning model output into
+something you could actually hand to someone who needs to make a decision.
 
-## Data & licences
+## Data and licences
 
-xView3-SAR is free after registration; WDPA polygons from Protected Planet.
-Verify current dataset terms and AIS data-use conditions before publishing
-results; treat all effort estimates as uncertainty-bounded extrapolations.
+xView3-SAR is free once you register; the protected-area boundaries come from
+Protected Planet (WDPA). Check the current dataset terms and AIS data-use
+conditions before publishing anything, and remember the effort estimates are
+bounded extrapolations, not hard measurements.
